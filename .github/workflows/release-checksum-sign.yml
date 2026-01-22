@@ -1,0 +1,65 @@
+
+name: Attach checksums and GPG signature to release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  checksum-and-sign:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq gnupg
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir assets
+
+          gh api repos/${{ github.repository }}/releases/${{ github.event.release.id }} \
+            --jq '.assets[].browser_download_url' > urls.txt
+
+          while read -r url; do
+            curl -L "$url" -o "assets/$(basename "$url")"
+          done < urls.txt
+
+      - name: Generate checksum.txt (sha256)
+        run: |
+          set -euo pipefail
+          cd assets
+          ls -1 \
+            | grep -v -E '(checksum|\.asc$|\.sig$)' \
+            | xargs sha256sum > checksum.txt
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --yes \
+            --pinentry-mode loopback \
+            --passphrase "$GPG_PASSPHRASE" --import
+
+      - name: Sign checksum.txt
+        run: |
+          cd assets
+          gpg --batch --yes \
+            --pinentry-mode loopback \
+            --passphrase "$GPG_PASSPHRASE" \
+            --armor --detach-sign checksum.txt
+
+      - name: Upload checksum and signature
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            assets/checksum.txt \
+            assets/checksum.txt.asc \
+            --clobber
